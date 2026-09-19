@@ -6,7 +6,7 @@
 //   https://finance.ozon.ru/__dump/raw    the last response as-is (contains personal data, don't share)
 // Settings live in the module line:
 //   argument=MARKETING_BANNER_SLIDER+mode:null|nodata|empty|blank|remove+order:null|empty|keep
-const VERSION = 'd1';
+const VERSION = 'd2';
 const KEY = 'ozon_debug';
 const MARK = /ob-banner-manager/i;
 
@@ -87,6 +87,13 @@ function save(s) { if (!$persistentStore.write(JSON.stringify(s), KEY)) { s.raw 
 
 if (typeof $response !== 'undefined') {
   const body = $response.body || '';
+  const head = Object.assign({}, $response.headers || {});
+  const hv = (n) => { const k = Object.keys(head).find((x) => x.toLowerCase() === n); return k ? head[k] : ''; };
+  const cacheInfo = `cache-control: ${hv('cache-control') || '(none)'} | etag: ${hv('etag') ? 'yes' : 'no'} | age: ${hv('age') || '-'} | expires: ${hv('expires') || '-'}`;
+  // stop the app from reusing this response next launch
+  for (const k of Object.keys(head)) if (/^(cache-control|etag|expires|last-modified|age|pragma|content-length)$/i.test(k)) delete head[k];
+  head['Cache-Control'] = 'no-store, no-cache, must-revalidate';
+  head['Pragma'] = 'no-cache';
   const url = $request.url.split('?')[0].replace('https://finance.ozon.ru', '');
   let data = null;
   try { data = JSON.parse(body); } catch (e) {}
@@ -105,12 +112,13 @@ if (typeof $response !== 'undefined') {
     json: data ? `yes, ${body.length} chars` : `NO - not JSON, ${body.length} chars`,
     widgets: [...new Set(seen)].join(', ') || '(none)',
     changes: changes.length ? changes.join('; ') : '(nothing matched)',
-    sent: changes.length ? 'modified body sent to app' : 'original body sent to app',
+    sent: (changes.length ? 'modified body' : 'original body') + ' sent, caching turned off',
+    cache: cacheInfo,
     before: before.slice(0, 900), after: after.slice(0, 900),
   }]).slice(-6);
   if (data && /MFEMainMobile/.test(url)) { s.full = JSON.stringify(outline(data, 0), null, 1); s.raw = body; }
   save(s);
-  $done(changes.length ? { body: JSON.stringify(data) } : {});
+  $done({ body: data ? JSON.stringify(data) : body, headers: head });
 } else {
   const s = load();
   const url = $request.url;
@@ -118,9 +126,9 @@ if (typeof $response !== 'undefined') {
   if (/\/raw/.test(url)) out = s.raw || 'nothing captured';
   else if (/\/full/.test(url)) out = s.full || 'nothing captured';
   else {
-    out = `script ${VERSION} loaded, status page works.\n\n`;
+    out = `script ${VERSION} loaded. This page opened at ${new Date().toISOString()}.\nIf the newest run below is older than your last app launch, the app did not fetch the main screen: it used its cached copy.\n\n`;
     out += (s.runs && s.runs.length)
-      ? s.runs.map((r) => `=== ${r.time} [${r.version}]\nurl:      ${r.url}\nsettings: ${r.settings}\nbody:     ${r.json}\nwidgets:  ${r.widgets}\nchanges:  ${r.changes}\nresult:   ${r.sent}\n\ncarousel widget BEFORE:\n${r.before}\n\ncarousel widget AFTER:\n${r.after}\n`).join('\n')
+      ? s.runs.map((r) => `=== ${r.time} [${r.version}]\nurl:      ${r.url}\nsettings: ${r.settings}\nbody:     ${r.json}\ncaching:  ${r.cache || '(not recorded)'}\nwidgets:  ${r.widgets}\nchanges:  ${r.changes}\nresult:   ${r.sent}\n\ncarousel widget BEFORE:\n${r.before}\n\ncarousel widget AFTER:\n${r.after}\n`).join('\n')
       : 'No responses processed. The response scripts are not running:\ncheck that script-path is a real URL in every line and that no other module matches the same URLs.';
   }
   $done({ response: { status: 200, headers: { 'Content-Type': 'text/plain; charset=utf-8' }, body: out } });
