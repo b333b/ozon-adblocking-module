@@ -6,7 +6,7 @@
 //   https://finance.ozon.ru/__dump/raw    the last response as-is (contains personal data, don't share)
 // Settings live in the module line:
 //   argument=MARKETING_BANNER_SLIDER+mode:null|nodata|empty|blank|remove+order:null|empty|keep
-const VERSION = 'd7';
+const VERSION = 'd8';
 const KEY = 'ozon_debug';
 const MARK = /ob-banner-manager/i;
 
@@ -94,6 +94,46 @@ function emptySsrBanners(text) {
   return text;
 }
 
+// In the page HTML: empty arrays of banners inside the embedded state (e.g. "banners":[...]),
+// in both percent-encoded and plain form, brackets counted with escapes respected.
+function emptyEncodedArrays(text, keys) {
+  const forms = [
+    { enc: true, quote: '%22', esc: '%5C', open: '%5B', close: '%5D', k: (n) => `%22${n}%22%3A%5B` },
+    { enc: false, quote: '"', esc: '\\', open: '[', close: ']', k: (n) => `"${n}":[` },
+  ];
+  for (const f of forms) {
+    for (const name of keys) {
+      const key = f.k(name);
+      let pos = 0, guard = 0;
+      while (guard++ < 20) {
+        const at = text.indexOf(key, pos);
+        if (at < 0) break;
+        const from = at + key.length;
+        let i = from, depth = 1, inStr = false;
+        while (i < text.length && depth > 0) {
+          if (inStr && text.startsWith(f.esc, i)) {
+            i += f.esc.length;
+            if (text.startsWith(f.esc, i)) i += f.esc.length;
+            else if (text.startsWith(f.quote, i)) i += f.quote.length;
+            else i += 1;
+            continue;
+          }
+          if (text.startsWith(f.quote, i)) { inStr = !inStr; i += f.quote.length; continue; }
+          if (!inStr && text.startsWith(f.open, i)) { depth++; i += f.open.length; continue; }
+          if (!inStr && text.startsWith(f.close, i)) { depth--; if (!depth) break; i += f.close.length; continue; }
+          i += 1;
+        }
+        if (depth === 0 && i > from) {
+          changes.push(`page: "${name}" list emptied (${i - from} chars)`);
+          text = text.slice(0, from) + text.slice(i);
+        }
+        pos = from;
+      }
+    }
+  }
+  return text;
+}
+
 // For banner-list responses: empty any array whose items look like banners
 const BANNER_KEYS = ['bannerId', 'placementSlug', 'image', 'imageDark', 'config', 'creativeId'];
 function emptyBannerLists(node, path) {
@@ -155,7 +195,7 @@ if (typeof $response !== 'undefined') {
   // Non-JSON responses (the main screen's HTML): look for banner traces, change nothing
   if (!data) {
     const isPage = /\/m\/lk\//.test(url);
-    const newBody = isPage ? emptySsrBanners(body) : body;
+    const newBody = isPage ? emptyEncodedArrays(emptySsrBanners(body), ['banners', 'creatives']) : body;
     const hits = (re) => (body.match(re) || []).length;
     const snips = [];
     const re = /ob-banner-manager/gi;
@@ -182,6 +222,8 @@ if (typeof $response !== 'undefined') {
       const win = body.slice(Math.max(0, at - 6000), at + 3000);
       s2.html = { url, when: new Date().toISOString(), hits: (body.match(/ob-banner-manager/gi) || []).length, text: dec(dec(win)).replace(/\\"/g, '"') };
     }
+    const at2 = body.search(/bannersV2/);
+    if (at2 >= 0) s2.html2 = { url, when: new Date().toISOString(), text: dec(dec(body.slice(Math.max(0, at2 - 3000), at2 + 6000))).replace(/\\\\"/g, '"') };
     s2.raw = body.slice(0, 200000);
     save(s2);
     $done({ body: newBody, headers: head });
@@ -223,7 +265,8 @@ if (typeof $response !== 'undefined') {
   const s = load();
   const url = $request.url;
   let out;
-  if (/\/html/.test(url)) out = s.html ? `### ${s.html.url} (${s.html.when})  ob-banner-manager hits: ${s.html.hits}\n\n${s.html.text}` : 'no page captured yet';
+  if (/\/html2/.test(url)) out = s.html2 ? `### ${s.html2.url} (${s.html2.when})\n\n${s.html2.text}` : 'no page captured yet';
+  else if (/\/html/.test(url)) out = s.html ? `### ${s.html.url} (${s.html.when})  ob-banner-manager hits: ${s.html.hits}\n\n${s.html.text}` : 'no page captured yet';
   else if (/\/raw/.test(url)) out = s.raw || 'nothing captured';
   else if (/\/full/.test(url)) out = (s.fulls && s.fulls.length)
     ? s.fulls.map((f) => `### ${f.url}  (${f.when})\n${f.text}`).join('\n\n')
