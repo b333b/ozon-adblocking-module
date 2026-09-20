@@ -6,7 +6,7 @@
 //   https://finance.ozon.ru/__dump/raw    the last response as-is (contains personal data, don't share)
 // Settings live in the module line:
 //   argument=MARKETING_BANNER_SLIDER+mode:null|nodata|empty|blank|remove+order:null|empty|keep
-const VERSION = 'd6';
+const VERSION = 'd7';
 const KEY = 'ozon_debug';
 const MARK = /ob-banner-manager/i;
 
@@ -56,6 +56,42 @@ function blankOne(holder, key) {
   if (/^\s*[\[{]/.test(v)) { try { const d = JSON.parse(v); const n = blankImages(d); if (n) { holder[key] = JSON.stringify(d); return n; } } catch (e) {} }
   holder[key] = '';
   return 1;
+}
+
+// In the page HTML: empty the server-rendered body of the promo banner microfrontends.
+// The page carries them as "MFPromoBanners...@promo": { data: { body: "<html...>" } },
+// usually percent-encoded, with inner quotes escaped as \\".
+function emptySsrBanners(text) {
+  const forms = [
+    { id: /MFPromoBanners[A-Za-z]*%40promo/, key: '%22body%22%3A%22', quote: '%22', esc: '%5C' },
+    { id: /MFPromoBanners[A-Za-z]*@promo/, key: '"body":"', quote: '"', esc: '\\' },
+  ];
+  for (const f of forms) {
+    let pos = 0, guard = 0;
+    while (guard++ < 10) {
+      const rel = text.slice(pos).search(f.id);
+      if (rel < 0) break;
+      const idAt = pos + rel;
+      const start = text.indexOf(f.key, idAt);
+      if (start < 0 || start - idAt > 400) { pos = idAt + 20; continue; }
+      const from = start + f.key.length;
+      let i = from, end = -1;
+      while (i < text.length) {
+        const q = text.indexOf(f.quote, i);
+        if (q < 0) break;
+        let back = 0;
+        while (q - (back + 1) * f.esc.length >= 0 && text.substr(q - (back + 1) * f.esc.length, f.esc.length) === f.esc) back++;
+        if (back % 2 === 0) { end = q; break; }
+        i = q + f.quote.length;
+      }
+      if (end > from) {
+        changes.push(`page: rendered banner block emptied (${end - from} chars)`);
+        text = text.slice(0, from) + text.slice(end);
+      }
+      pos = from;
+    }
+  }
+  return text;
 }
 
 // For banner-list responses: empty any array whose items look like banners
@@ -118,6 +154,8 @@ if (typeof $response !== 'undefined') {
   try { data = JSON.parse(body); } catch (e) {}
   // Non-JSON responses (the main screen's HTML): look for banner traces, change nothing
   if (!data) {
+    const isPage = /\/m\/lk\//.test(url);
+    const newBody = isPage ? emptySsrBanners(body) : body;
     const hits = (re) => (body.match(re) || []).length;
     const snips = [];
     const re = /ob-banner-manager/gi;
@@ -132,8 +170,8 @@ if (typeof $response !== 'undefined') {
       json: `NOT JSON, ${body.length} chars`,
       cache: cacheInfo,
       widgets: `ob-banner-manager: ${hits(/ob-banner-manager/gi)} | MARKETING_BANNER_SLIDER: ${hits(/MARKETING_BANNER_SLIDER/g)} | bannersV2: ${hits(/bannersV2/g)} | creatives: ${hits(/creatives/g)}`,
-      changes: '(text response, left alone)',
-      sent: 'original body sent, caching turned off',
+      changes: changes.length ? changes.join('; ') : '(no server-rendered banner block found)',
+      sent: (newBody === body ? 'original body' : `modified body (${body.length - newBody.length} chars removed)`) + ' sent, caching turned off',
       before: snips.length ? snips.join('\n---\n').slice(0, 900) : '(no banner links in this response)',
       after: '(unchanged)',
     }]).slice(-6);
@@ -146,7 +184,7 @@ if (typeof $response !== 'undefined') {
     }
     s2.raw = body.slice(0, 200000);
     save(s2);
-    $done({ body, headers: head });
+    $done({ body: newBody, headers: head });
   } else {
     let before = '(no target widget in this response)', after = before;
     const isList = /banners\/list|\/banners$/.test(url);
