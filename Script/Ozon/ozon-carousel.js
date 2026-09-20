@@ -84,7 +84,10 @@ function emptyEncodedArrays(text, keys) {
 //     its own. Its markup sits in the page twice, encoded and plain, and the module can redraw
 //     it on the client, so empty both copies and hide it with CSS.
 const MODULE_IDS = ['MFCardState%40ca-traffic', 'MFCardState@ca-traffic'];
-const HIDE_SELECTORS = ['[data-testid="order-plastic-v1"]'];
+const HIDE_SELECTORS = [
+  '[data-testid="order-plastic-v1"]',   // "Карта с выгодой…" with the "Заказать бесплатно" button
+  '[data-testid="new-product-block"]',  // the "Новый счёт или продукт" card in the wallet row
+];
 
 function emptyModuleBodies(text) {
   for (const id of MODULE_IDS) {
