@@ -6,7 +6,7 @@
 //   https://finance.ozon.ru/__dump/raw    the last response as-is (contains personal data, don't share)
 // Settings live in the module line:
 //   argument=MARKETING_BANNER_SLIDER+mode:null|nodata|empty|blank|remove+order:null|empty|keep
-const VERSION = 'd2';
+const VERSION = 'd5';
 const KEY = 'ozon_debug';
 const MARK = /ob-banner-manager/i;
 
@@ -58,6 +58,21 @@ function blankOne(holder, key) {
   return 1;
 }
 
+// For banner-list responses: empty any array whose items look like banners
+const BANNER_KEYS = ['bannerId', 'placementSlug', 'image', 'imageDark', 'config', 'creativeId'];
+function emptyBannerLists(node, path) {
+  if (Array.isArray(node)) { node.forEach((v, i) => emptyBannerLists(v, `${path}[${i}]`)); return; }
+  if (!node || typeof node !== 'object') return;
+  for (const k of Object.keys(node)) {
+    const v = node[k];
+    emptyBannerLists(v, `${path}.${k}`); // innermost first
+    if (Array.isArray(v) && v.length && v.every((x) => x && typeof x === 'object' && BANNER_KEYS.some((b) => b in x))) {
+      changes.push(`${path}.${k}: ${v.length} banners cleared`);
+      node[k] = [];
+    }
+  }
+}
+
 function walk(node) {
   if (Array.isArray(node)) {
     for (let i = node.length - 1; i >= 0; i--) {
@@ -83,7 +98,11 @@ function walk(node) {
 }
 
 function load() { try { return JSON.parse($persistentStore.read(KEY) || '{}'); } catch (e) { return {}; } }
-function save(s) { if (!$persistentStore.write(JSON.stringify(s), KEY)) { s.raw = ''; s.full = ''; $persistentStore.write(JSON.stringify(s), KEY); } }
+function save(s) {
+  if ($persistentStore.write(JSON.stringify(s), KEY)) return;
+  s.raw = '';
+  if (!$persistentStore.write(JSON.stringify(s), KEY)) { s.fulls = (s.fulls || []).slice(-1); $persistentStore.write(JSON.stringify(s), KEY); }
+}
 
 if (typeof $response !== 'undefined') {
   const body = $response.body || '';
@@ -97,34 +116,72 @@ if (typeof $response !== 'undefined') {
   const url = $request.url.split('?')[0].replace('https://finance.ozon.ru', '');
   let data = null;
   try { data = JSON.parse(body); } catch (e) {}
-  let before = '(no target widget in this response)', after = before;
-  if (data && typeof data === 'object') {
-    const t = find(data, []);
-    if (t.length) before = JSON.stringify(outline(t[0], 0), null, 1);
-    walk(data);
-    const t2 = find(data, []);
-    after = t2.length ? JSON.stringify(outline(t2[0], 0), null, 1) : '(widget no longer present)';
+  // Non-JSON responses (the main screen's HTML): look for banner traces, change nothing
+  if (!data) {
+    const hits = (re) => (body.match(re) || []).length;
+    const snips = [];
+    const re = /ob-banner-manager/gi;
+    let m;
+    while ((m = re.exec(body)) && snips.length < 3) {
+      snips.push(body.slice(Math.max(0, m.index - 150), m.index + 150).replace(/[0-9]{3,}/g, '#').replace(/[А-Яа-яЁё]+/g, '…'));
+    }
+    const s2 = load();
+    s2.runs = (s2.runs || []).concat([{
+      time: new Date().toISOString(), version: VERSION, url,
+      settings: 'text response, not modified',
+      json: `NOT JSON, ${body.length} chars`,
+      cache: cacheInfo,
+      widgets: `ob-banner-manager: ${hits(/ob-banner-manager/gi)} | MARKETING_BANNER_SLIDER: ${hits(/MARKETING_BANNER_SLIDER/g)} | bannersV2: ${hits(/bannersV2/g)} | creatives: ${hits(/creatives/g)}`,
+      changes: '(text response, left alone)',
+      sent: 'original body sent, caching turned off',
+      before: snips.length ? snips.join('\n---\n').slice(0, 900) : '(no banner links in this response)',
+      after: '(unchanged)',
+    }]).slice(-6);
+    s2.raw = body.slice(0, 200000);
+    save(s2);
+    $done({ body, headers: head });
+  } else {
+    let before = '(no target widget in this response)', after = before;
+    const isList = /banners\/list|\/banners$/.test(url);
+    if (data && typeof data === 'object') {
+      if (isList) {
+        before = JSON.stringify(outline(data, 0), null, 1);
+        emptyBannerLists(data, '$');
+        after = JSON.stringify(outline(data, 0), null, 1);
+      } else {
+        const t = find(data, []);
+        if (t.length) before = JSON.stringify(outline(t[0], 0), null, 1);
+        walk(data);
+        const t2 = find(data, []);
+        after = t2.length ? JSON.stringify(outline(t2[0], 0), null, 1) : '(widget no longer present)';
+      }
+    }
+    const s = load();
+    s.runs = (s.runs || []).concat([{
+      time: new Date().toISOString(), version: VERSION, url,
+      settings: `mode ${MODE} | order ${ORDER} | types ${TYPES.join(', ')}`,
+      json: data ? `yes, ${body.length} chars` : `NO - not JSON, ${body.length} chars`,
+      widgets: [...new Set(seen)].join(', ') || '(none)',
+      changes: changes.length ? changes.join('; ') : '(nothing matched)',
+      sent: (changes.length ? 'modified body' : 'original body') + ' sent, caching turned off',
+      cache: cacheInfo,
+      before: before.slice(0, 900), after: after.slice(0, 900),
+    }]).slice(-6);
+    if (data) {
+      s.fulls = (s.fulls || []).filter((f) => f.url !== url).concat([{ url, when: new Date().toISOString(), text: JSON.stringify(outline(data, 0), null, 1) }]).slice(-3);
+      s.raw = body;
+    }
+    save(s);
+    $done({ body: data ? JSON.stringify(data) : body, headers: head });
   }
-  const s = load();
-  s.runs = (s.runs || []).concat([{
-    time: new Date().toISOString(), version: VERSION, url,
-    settings: `mode ${MODE} | order ${ORDER} | types ${TYPES.join(', ')}`,
-    json: data ? `yes, ${body.length} chars` : `NO - not JSON, ${body.length} chars`,
-    widgets: [...new Set(seen)].join(', ') || '(none)',
-    changes: changes.length ? changes.join('; ') : '(nothing matched)',
-    sent: (changes.length ? 'modified body' : 'original body') + ' sent, caching turned off',
-    cache: cacheInfo,
-    before: before.slice(0, 900), after: after.slice(0, 900),
-  }]).slice(-6);
-  if (data && /MFEMainMobile/.test(url)) { s.full = JSON.stringify(outline(data, 0), null, 1); s.raw = body; }
-  save(s);
-  $done({ body: data ? JSON.stringify(data) : body, headers: head });
 } else {
   const s = load();
   const url = $request.url;
   let out;
   if (/\/raw/.test(url)) out = s.raw || 'nothing captured';
-  else if (/\/full/.test(url)) out = s.full || 'nothing captured';
+  else if (/\/full/.test(url)) out = (s.fulls && s.fulls.length)
+    ? s.fulls.map((f) => `### ${f.url}  (${f.when})\n${f.text}`).join('\n\n')
+    : 'nothing captured';
   else {
     out = `script ${VERSION} loaded. This page opened at ${new Date().toISOString()}.\nIf the newest run below is older than your last app launch, the app did not fetch the main screen: it used its cached copy.\n\n`;
     out += (s.runs && s.runs.length)
