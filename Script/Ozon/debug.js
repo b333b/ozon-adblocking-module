@@ -6,7 +6,7 @@
 //   https://finance.ozon.ru/__dump/raw    the last response as-is (contains personal data, don't share)
 // Settings live in the module line:
 //   argument=MARKETING_BANNER_SLIDER+mode:null|nodata|empty|blank|remove+order:null|empty|keep
-const VERSION = 'd9';
+const VERSION = 'd10';
 const KEY = 'ozon_debug';
 const MARK = /ob-banner-manager/i;
 
@@ -134,46 +134,51 @@ function emptyEncodedArrays(text, keys) {
   return text;
 }
 
-// Locate a phrase in the page and, when it sits in a promo-ish module, empty that module's body.
-const PHRASES = ['Заказать бесплатно', 'Карта с выгодой'];
-const SAFE_MF = /(promo|ca-traffic|banner|offer)/i;
-let findReport = '';
-function handlePhrases(text) {
-  for (const phrase of PHRASES) {
-    for (const needle of [encodeURIComponent(phrase), phrase]) {
-      const at = text.indexOf(needle);
-      if (at < 0) continue;
-      const back = text.slice(Math.max(0, at - 30000), at);
-      const ids = back.match(/MF[A-Za-z0-9]+(?:%40|@)[A-Za-z0-9-]+/g) || [];
-      const id = ids.length ? ids[ids.length - 1] : '(no module id found)';
-      findReport += `phrase: ${phrase}\nfound at: ${at}\nnearest module: ${id}\n\n`;
-      if (SAFE_MF.test(id)) {
-        const enc = id.indexOf('%40') > 0;
-        const key = enc ? '%22body%22%3A%22' : '"body":"';
-        const quote = enc ? '%22' : '"';
-        const esc = enc ? '%5C' : '\\';
-        const idAt = text.lastIndexOf(id, at);
-        const start = text.indexOf(key, idAt);
-        if (start > 0 && start < at) {
-          const from = start + key.length;
-          let i = from, end = -1;
-          while (i < text.length) {
-            const q = text.indexOf(quote, i);
-            if (q < 0) break;
-            let b = 0;
-            while (q - (b + 1) * esc.length >= 0 && text.substr(q - (b + 1) * esc.length, esc.length) === esc) b++;
-            if (b % 2 === 0) { end = q; break; }
-            i = q + quote.length;
-          }
-          if (end > from) {
-            changes.push(`page: ${id} body emptied (${end - from} chars)`);
-            text = text.slice(0, from) + text.slice(end);
-          }
-        }
+// The card offer block: its markup sits in the page twice (percent-encoded and plain),
+// and the module redraws it on the client, so empty both copies and hide it with CSS.
+const HIDE_SELECTORS = ['[data-testid="order-plastic-v1"]'];
+const MODULE_IDS = ['MFCardState%40ca-traffic', 'MFCardState@ca-traffic'];
+
+function emptyModuleBodies(text) {
+  for (const id of MODULE_IDS) {
+    const enc = id.indexOf('%40') > 0;
+    const key = enc ? '%22body%22%3A%22' : '"body":"';
+    const quote = enc ? '%22' : '"';
+    const esc = enc ? '%5C' : '\\';
+    let pos = 0, guard = 0;
+    while (guard++ < 10) {
+      const idAt = text.indexOf(id, pos);
+      if (idAt < 0) break;
+      const start = text.indexOf(key, idAt);
+      if (start < 0 || start - idAt > 400) { pos = idAt + id.length; continue; }
+      const from = start + key.length;
+      let i = from, end = -1;
+      while (i < text.length) {
+        const q = text.indexOf(quote, i);
+        if (q < 0) break;
+        let b = 0;
+        while (q - (b + 1) * esc.length >= 0 && text.substr(q - (b + 1) * esc.length, esc.length) === esc) b++;
+        if (b % 2 === 0) { end = q; break; }
+        i = q + quote.length;
       }
-      break;
+      if (end > from) {
+        changes.push(`page: ${id} body emptied (${end - from} chars)`);
+        text = text.slice(0, from) + text.slice(end);
+      }
+      pos = from;
     }
   }
+  return text;
+}
+
+function injectHidingCss(text) {
+  if (!HIDE_SELECTORS.length) return text;
+  const css = `<style id="ozon-hide">${HIDE_SELECTORS.join(', ')} { display: none !important; }</style>`;
+  const at = text.search(/<\/head>/i);
+  if (at >= 0) { changes.push('page: hiding CSS injected'); return text.slice(0, at) + css + text.slice(at); }
+  const b = text.search(/<body[^>]*>/i);
+  if (b >= 0) { const e = text.indexOf('>', b) + 1; changes.push('page: hiding CSS injected after <body>'); return text.slice(0, e) + css + text.slice(e); }
+  changes.push('page: no <head> or <body> found, CSS not injected');
   return text;
 }
 
@@ -238,7 +243,7 @@ if (typeof $response !== 'undefined') {
   // Non-JSON responses (the main screen's HTML): look for banner traces, change nothing
   if (!data) {
     const isPage = /\/m\/lk\//.test(url);
-    const newBody = isPage ? handlePhrases(emptyEncodedArrays(emptySsrBanners(body), ['banners', 'creatives'])) : body;
+    const newBody = isPage ? injectHidingCss(emptyModuleBodies(emptyEncodedArrays(emptySsrBanners(body), ['banners', 'creatives']))) : body;
     const hits = (re) => (body.match(re) || []).length;
     const snips = [];
     const re = /ob-banner-manager/gi;
@@ -267,11 +272,6 @@ if (typeof $response !== 'undefined') {
     }
     const at2 = body.search(/bannersV2/);
     if (at2 >= 0) s2.html2 = { url, when: new Date().toISOString(), text: dec(dec(body.slice(Math.max(0, at2 - 3000), at2 + 6000))).replace(/\\\\"/g, '"') };
-    if (findReport) {
-      const p0 = body.indexOf(encodeURIComponent(PHRASES[0]));
-      const p1 = p0 >= 0 ? p0 : body.indexOf(PHRASES[0]);
-      s2.find = findReport + (p1 >= 0 ? '\n' + dec(dec(body.slice(Math.max(0, p1 - 4000), p1 + 2000))).replace(/\\\\"/g, '"') : '');
-    }
     s2.raw = body.slice(0, 200000);
     save(s2);
     $done({ body: newBody, headers: head });
