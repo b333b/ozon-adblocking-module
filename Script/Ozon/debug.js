@@ -6,7 +6,7 @@
 //   https://finance.ozon.ru/__dump/raw    the last response as-is (contains personal data, don't share)
 // Settings live in the module line:
 //   argument=MARKETING_BANNER_SLIDER+mode:null|nodata|empty|blank|remove+order:null|empty|keep
-const VERSION = 'd10';
+const VERSION = 'd11';
 const KEY = 'ozon_debug';
 const MARK = /ob-banner-manager/i;
 
@@ -137,6 +137,27 @@ function emptyEncodedArrays(text, keys) {
 // The card offer block: its markup sits in the page twice (percent-encoded and plain),
 // and the module redraws it on the client, so empty both copies and hide it with CSS.
 const HIDE_SELECTORS = ['[data-testid="order-plastic-v1"]'];
+// Blocks to find by their visible text: the closest test id in front of the text is hidden.
+const HIDE_TEXTS = ['Новый счёт или продукт'];
+let textReport = '';
+
+function selectorsForTexts(text) {
+  const found = [];
+  for (const phrase of HIDE_TEXTS) {
+    for (const needle of [encodeURIComponent(phrase), phrase]) {
+      const at = text.indexOf(needle);
+      if (at < 0) continue;
+      const dec1 = (t) => t.replace(/(?:%[0-9A-Fa-f]{2})+/g, (g) => { try { return decodeURIComponent(g); } catch (e) { return g; } });
+      const win = dec1(dec1(text.slice(Math.max(0, at - 2500), at + 500))).replace(/\\"/g, '"');
+      const ids = win.match(/data-testid="[^"]+"/g) || [];
+      const pick = ids.length ? ids[ids.length - 1] : '';
+      if (pick) { found.push(`[${pick}]`); changes.push(`page: "${phrase}" -> ${pick}`); }
+      textReport += `text: ${phrase}\nat: ${at}\ntest ids nearby: ${ids.slice(-6).join(' ') || '(none)'}\nchosen: ${pick || '(none)'}\n\nmarkup:\n${win.replace(/[0-9]{6,}/g, '#').replace(/[\w.+-]+@[\w.-]+/g, '<email>')}\n\n`;
+      break;
+    }
+  }
+  return found;
+}
 const MODULE_IDS = ['MFCardState%40ca-traffic', 'MFCardState@ca-traffic'];
 
 function emptyModuleBodies(text) {
@@ -172,8 +193,9 @@ function emptyModuleBodies(text) {
 }
 
 function injectHidingCss(text) {
-  if (!HIDE_SELECTORS.length) return text;
-  const css = `<style id="ozon-hide">${HIDE_SELECTORS.join(', ')} { display: none !important; }</style>`;
+  const sels = HIDE_SELECTORS.concat(selectorsForTexts(text));
+  if (!sels.length) return text;
+  const css = `<style id="ozon-hide">${sels.join(', ')} { display: none !important; }</style>`;
   const at = text.search(/<\/head>/i);
   if (at >= 0) { changes.push('page: hiding CSS injected'); return text.slice(0, at) + css + text.slice(at); }
   const b = text.search(/<body[^>]*>/i);
@@ -272,6 +294,7 @@ if (typeof $response !== 'undefined') {
     }
     const at2 = body.search(/bannersV2/);
     if (at2 >= 0) s2.html2 = { url, when: new Date().toISOString(), text: dec(dec(body.slice(Math.max(0, at2 - 3000), at2 + 6000))).replace(/\\\\"/g, '"') };
+    if (textReport) s2.find = textReport;
     s2.raw = body.slice(0, 200000);
     save(s2);
     $done({ body: newBody, headers: head });
