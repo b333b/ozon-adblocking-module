@@ -1,4 +1,5 @@
-// Ozon Bank: removes banner ads from the main screen. Handles all three places they arrive:
+// Ozon Bank: removes the banner carousel and the card offer from the main screen.
+// Handles every place they arrive:
 //   1. /m/lk/main                          the rendered banner markup and the banner data in the page
 //   2. apps/main/_mf/info/MFEMainMobile    the banner widgets in the main-screen data
 //   3. apps/promo/api/banners/list         the banner query
@@ -79,6 +80,51 @@ function emptyEncodedArrays(text, keys) {
   return text;
 }
 
+// 1c. The card offer ("Карта с выгодой…" with the "Заказать бесплатно" button) is a module of
+//     its own. Its markup sits in the page twice, encoded and plain, and the module can redraw
+//     it on the client, so empty both copies and hide it with CSS.
+const MODULE_IDS = ['MFCardState%40ca-traffic', 'MFCardState@ca-traffic'];
+const HIDE_SELECTORS = ['[data-testid="order-plastic-v1"]'];
+
+function emptyModuleBodies(text) {
+  for (const id of MODULE_IDS) {
+    const enc = id.indexOf('%40') > 0;
+    const key = enc ? '%22body%22%3A%22' : '"body":"';
+    const quote = enc ? '%22' : '"';
+    const esc = enc ? '%5C' : '\\';
+    let pos = 0, guard = 0;
+    while (guard++ < 10) {
+      const idAt = text.indexOf(id, pos);
+      if (idAt < 0) break;
+      const start = text.indexOf(key, idAt);
+      if (start < 0 || start - idAt > 400) { pos = idAt + id.length; continue; }
+      const from = start + key.length;
+      let i = from, end = -1;
+      while (i < text.length) {
+        const q = text.indexOf(quote, i);
+        if (q < 0) break;
+        let b = 0;
+        while (q - (b + 1) * esc.length >= 0 && text.substr(q - (b + 1) * esc.length, esc.length) === esc) b++;
+        if (b % 2 === 0) { end = q; break; }
+        i = q + quote.length;
+      }
+      if (end > from) text = text.slice(0, from) + text.slice(end);
+      pos = from;
+    }
+  }
+  return text;
+}
+
+function injectHidingCss(text) {
+  if (!HIDE_SELECTORS.length) return text;
+  const css = `<style id="ozon-hide">${HIDE_SELECTORS.join(', ')} { display: none !important; }</style>`;
+  const at = text.search(/<\/head>/i);
+  if (at >= 0) return text.slice(0, at) + css + text.slice(at);
+  const b = text.search(/<body[^>]*>/i);
+  if (b >= 0) { const e = text.indexOf('>', b) + 1; return text.slice(0, e) + css + text.slice(e); }
+  return text;
+}
+
 // 2. Main-screen data: the listed widget types arrive with no data, the state the app uses for empty widgets.
 function hideWidgets(node) {
   if (Array.isArray(node)) { node.forEach(hideWidgets); return; }
@@ -109,7 +155,7 @@ if (data && typeof data === 'object') {
   else hideWidgets(data);
   out = JSON.stringify(data);
 } else if (/\/m\/lk\//.test(url) && body) {
-  out = emptyEncodedArrays(emptySsrBanners(body), ['banners', 'creatives']);
+  out = injectHidingCss(emptyModuleBodies(emptyEncodedArrays(emptySsrBanners(body), ['banners', 'creatives'])));
 }
 
 const head = Object.assign({}, $response.headers || {});
